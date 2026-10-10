@@ -205,6 +205,8 @@
 //! }
 //! ```
 
+#![doc = include_str!("recycling.md")]
+
 mod common;
 mod state;
 

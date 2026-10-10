@@ -79,6 +79,8 @@ Public paths stay direct—such as `asyncband::mutex`, `asyncband::pool`, and `a
 
 Runnable examples live in the [`examples`](examples) workspace crate. They demonstrate how to choose and compose Asyncband primitives in complete programs.
 
+The [pool recycling example](examples/src/pool_recycling.rs) demonstrates rejection diagnostics, intentional retirement, and cancellation-safe cleanup before returning an object.
+
 ## API map
 
 | Area                 | API                                                                                            | Feature        | Use                                                                                                             |
