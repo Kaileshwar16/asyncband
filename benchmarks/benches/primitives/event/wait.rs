@@ -34,6 +34,7 @@ const WAITER_COUNTS: &[usize] = &[1, 4, 16];
 const THREAD_COUNTS: &[usize] = &[1, 2, 4, 8];
 const CONTENDED_SAMPLE_SIZE: u32 = 256;
 
+// All benchmark threads read the same event without concurrent state transitions.
 #[divan::bench(args = [false, true], threads = THREAD_COUNTS, sample_size = CONTENDED_SAMPLE_SIZE)]
 fn is_set(bencher: Bencher, is_set: bool) {
     let event = ManualResetEvent::with_state(is_set);
@@ -41,6 +42,7 @@ fn is_set(bencher: Bencher, is_set: bool) {
     bencher.bench(|| black_box(black_box(&event).is_set()));
 }
 
+// Each iteration creates and polls a fresh wait against the same already-set event.
 #[divan::bench(threads = THREAD_COUNTS, sample_size = CONTENDED_SAMPLE_SIZE)]
 fn wait_already_set(bencher: Bencher) {
     let event = ManualResetEvent::with_state(true);
@@ -80,6 +82,7 @@ fn reused_waiter_handoff(bencher: Bencher) {
     });
 }
 
+// Measures the full fan-out lifecycle, including allocation, registration, set, and completion.
 #[divan::bench(args = WAITER_COUNTS)]
 fn waiter_fan_out(bencher: Bencher, waiter_count: usize) {
     let mut context = bench_context();
@@ -103,6 +106,7 @@ fn waiter_fan_out(bencher: Bencher, waiter_count: usize) {
         });
 }
 
+// A fresh event per iteration includes allocating its waiter storage.
 #[divan::bench]
 fn cancel_pending(bencher: Bencher) {
     let mut context = bench_context();
@@ -117,6 +121,7 @@ fn cancel_pending(bencher: Bencher) {
     });
 }
 
+// Reusing the event retains waiter storage capacity across registration/cancellation cycles.
 #[divan::bench]
 fn cancel_pending_reused(bencher: Bencher) {
     let mut context = bench_context();
@@ -128,6 +133,7 @@ fn cancel_pending_reused(bencher: Bencher) {
     });
 }
 
+// Initial registration is outside the timed loop; every repoll uses the same waker.
 #[divan::bench]
 fn repoll_pending(bencher: Bencher) {
     let mut context = bench_context();
@@ -146,6 +152,8 @@ fn replace_pending_waker(bencher: Bencher) {
         fn wake(self: Arc<Self>) {}
     }
 
+    // Alternate distinct reference-counted wakers so every timed poll replaces the registration.
+    // These wakers exercise clone/drop costs but do not schedule executor tasks.
     let wakers = [Waker::from(Arc::new(Task)), Waker::from(Arc::new(Task))];
     let event = ManualResetEvent::new();
     let mut wait = pin!(event.wait());
@@ -158,6 +166,8 @@ fn replace_pending_waker(bencher: Bencher) {
     });
 }
 
+// Isolates set/detach/wake from registration and cleanup. The smaller sample size limits setup
+// costs for large cohorts; use --sample-count 200 without a time limit for repeated measurements.
 #[divan::bench(args = [1, 16, 256], sample_size = 64)]
 fn set_registered(bencher: Bencher, waiter_count: usize) {
     bencher
