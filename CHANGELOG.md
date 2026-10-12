@@ -32,6 +32,10 @@ All notable changes to this project will be documented in this file.
 * Prevent deadlocks in `singleflight::Group::work` and `try_work` when a duplicate key's destructor calls back into the same group.
 * Fix undefined behavior when sending or dropping a oneshot sender races with receiver completion or cancellation.
 
+### Improvements
+
+* Add a lock-free fast path for releasing `Semaphore` permits while permits remain available, which speeds up dropping `RwLock` read guards, releasing multi-permit `Semaphore` permits, and returning objects to a bounded pool that is not at capacity. `Mutex` releases are unchanged.
+
 ### Notable changes
 
 * Executor waker operations, including cloning, waking, and dropping, are expected not to panic; recovery from panicking waker callbacks is no longer supported.
