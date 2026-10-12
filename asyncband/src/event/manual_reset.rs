@@ -26,6 +26,7 @@ use std::task::Poll;
 use std::task::Waker;
 
 use crate::internal::mutex::Mutex;
+use crate::internal::register_waker;
 use crate::internal::waitlist::WaitList;
 use crate::internal::waitlist::WaiterId;
 use crate::internal::waker_batch::WakerBatch;
@@ -46,9 +47,9 @@ use crate::internal::waker_batch::WakerBatch;
 /// # Synchronization
 ///
 /// An unset-to-set transition synchronizes with the waits it releases, with waits first polled
-/// while the event remains set, and with successful [`try_wait`](Self::try_wait) calls that observe
-/// that set state. Memory operations sequenced before [`set`](Self::set) are therefore visible
-/// after those waits complete.
+/// while the event remains set, and with [`is_set`](Self::is_set) and [`try_wait`](Self::try_wait)
+/// calls that observe that set state and return `true`. Memory operations sequenced before
+/// [`set`](Self::set) are therefore visible after those waits complete or those calls return.
 ///
 /// A `set` call that finds the event already set does not establish this guarantee.
 ///
@@ -216,22 +217,17 @@ impl ManualResetEvent {
     /// `notified` alone decides whether a registered waiter is already committed.
     fn poll_wait(&self, waiter_id: &mut Option<WaiterId>, cx: &mut Context<'_>) -> Poll<()> {
         // Only an unregistered wait can skip the lock: a released waiter still owns a node.
-        let mut prepared_waker = if waiter_id.is_none() {
-            if self.is_set() {
-                return Poll::Ready(());
-            }
-            Some(cx.waker().clone())
-        } else {
-            None
-        };
+        if waiter_id.is_none() && self.is_set() {
+            return Poll::Ready(());
+        }
 
-        let (poll, retired_waker) = loop {
+        let (poll, retired_waker) = {
             let mut waiters = self.waiters.lock();
             match *waiter_id {
                 Some(id) if waiters.waiter_mut(id).notified => {
                     let waiter = waiters.remove_unlinked_waiter(id);
                     *waiter_id = None;
-                    break (Poll::Ready(()), waiter.waker);
+                    (Poll::Ready(()), waiter.waker)
                 }
                 Some(id) => {
                     debug_assert!(
@@ -239,35 +235,21 @@ impl ManualResetEvent {
                         "a linked waiter must belong to an unset event"
                     );
                     let waiter = waiters.waiter_mut(id);
-                    let current = waiter
-                        .waker
-                        .as_ref()
-                        .expect("an unnotified waiter must retain its waker");
-                    if current.will_wake(cx.waker()) {
-                        break (Poll::Pending, None);
-                    }
-                    if let Some(waker) = prepared_waker.take() {
-                        break (Poll::Pending, waiter.waker.replace(waker));
-                    }
-                    // Clone only a changed waker, outside the lock, then recheck commitment:
-                    // set/reset may run while preparing the replacement.
-                    drop(waiters);
-                    prepared_waker = Some(cx.waker().clone());
+                    (Poll::Pending, register_waker(&mut waiter.waker, cx.waker()))
                 }
                 // A set after the false fast probe must either be observed here or release
                 // the node that we register while holding this same lock.
-                None if self.is_set.load(Ordering::Relaxed) => break (Poll::Ready(()), None),
+                None if self.is_set.load(Ordering::Relaxed) => (Poll::Ready(()), None),
                 None => {
                     *waiter_id = Some(waiters.push_back(Waiter {
                         notified: false,
-                        waker: prepared_waker.take(),
+                        waker: Some(cx.waker().clone()),
                     }));
-                    break (Poll::Pending, None);
+                    (Poll::Pending, None)
                 }
             }
         };
 
-        drop(prepared_waker);
         drop(retired_waker);
         poll
     }

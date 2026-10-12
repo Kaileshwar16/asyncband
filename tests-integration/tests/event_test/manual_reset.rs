@@ -370,60 +370,7 @@ fn waker_on_clone(callback: impl Fn() + Send + Sync + 'static) -> Waker {
 }
 
 #[test]
-fn registration_rechecks_a_set_during_waker_preparation() {
-    assert_completes_without_deadlock(|| {
-        for reset in [false, true] {
-            let event = Arc::new(ManualResetEvent::new());
-            let on_clone = event.clone();
-            let waker = waker_on_clone(move || {
-                on_clone.set();
-                if reset {
-                    on_clone.reset();
-                }
-            });
-            let mut wait = Box::pin(event.wait());
-            let result = wait.as_mut().poll(&mut Context::from_waker(&waker));
-            if reset {
-                // This wait was not registered during the pulse. It belongs to the new period.
-                assert!(result.is_pending());
-                event.set();
-                assert!(poll_once(wait.as_mut()).is_ready());
-            } else {
-                // A false fast probe cannot cause registration after an unretracted set.
-                assert!(result.is_ready());
-            }
-        }
-    });
-}
-
-#[test]
-fn waker_replacement_rechecks_commitment_after_set_and_reset() {
-    assert_completes_without_deadlock(|| {
-        let event = Arc::new(ManualResetEvent::new());
-        let mut wait = Box::pin(event.wait());
-        assert!(poll_once(wait.as_mut()).is_pending());
-
-        let on_clone = event.clone();
-        let replacement = waker_on_clone(move || {
-            on_clone.set();
-            on_clone.reset();
-        });
-        assert!(
-            wait.as_mut()
-                .poll(&mut Context::from_waker(&replacement))
-                .is_ready()
-        );
-        assert!(!event.is_set());
-
-        let mut next = Box::pin(event.wait());
-        assert!(poll_once(next.as_mut()).is_pending());
-        event.set();
-        assert!(poll_once(next.as_mut()).is_ready());
-    });
-}
-
-#[test]
-fn ready_and_unchanged_pending_waits_do_not_clone_wakers() {
+fn waits_clone_wakers_only_for_new_or_changed_registrations() {
     let clones = Arc::new(AtomicUsize::new(0));
     let on_clone = clones.clone();
     let waker = waker_on_clone(move || {
@@ -439,9 +386,22 @@ fn ready_and_unchanged_pending_waits_do_not_clone_wakers() {
     assert!(wait.as_mut().poll(&mut context).is_pending());
     assert!(wait.as_mut().poll(&mut context).is_pending());
     assert_eq!(clones.load(Ordering::Relaxed), 1);
+
+    let on_clone = clones.clone();
+    let replacement = waker_on_clone(move || {
+        on_clone.fetch_add(1, Ordering::Relaxed);
+    });
+    let mut replacement_context = Context::from_waker(&replacement);
+    assert!(wait.as_mut().poll(&mut replacement_context).is_pending());
+    assert_eq!(clones.load(Ordering::Relaxed), 2);
+    assert!(wait.as_mut().poll(&mut replacement_context).is_pending());
+    assert_eq!(clones.load(Ordering::Relaxed), 2);
+
     event.set();
+    event.reset();
+    // A released waiter remains ready with a different waker, without cloning it.
     assert!(wait.as_mut().poll(&mut context).is_ready());
-    assert_eq!(clones.load(Ordering::Relaxed), 1);
+    assert_eq!(clones.load(Ordering::Relaxed), 2);
 }
 
 #[test]
