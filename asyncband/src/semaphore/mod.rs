@@ -51,6 +51,7 @@
 //! # }
 //! ```
 
+use std::ptr;
 use std::sync::Arc;
 
 use crate::internal::semaphore;
@@ -123,7 +124,7 @@ impl Semaphore {
         self.s.drain_permits(up_to)
     }
 
-    /// Reduces the semaphore's logical permit balance by exactly `n`.
+    /// Removes exactly `n` permits, consuming future releases if fewer are available.
     ///
     /// This method returns immediately. If fewer than `n` permits are currently available, future
     /// releases repay the resulting deficit before ordinary queued acquisitions may proceed.
@@ -148,7 +149,7 @@ impl Semaphore {
         self.s.reduce_permits(n);
     }
 
-    /// Adds `n` new permits to the semaphore.
+    /// Adds `permits` new permits to the semaphore.
     ///
     /// # Panics
     ///
@@ -167,7 +168,7 @@ impl Semaphore {
         self.s.release(permits);
     }
 
-    /// Attempts to acquire `n` permits from the semaphore without blocking.
+    /// Attempts to acquire `permits` permits from the semaphore without blocking.
     ///
     /// If the permits are successfully acquired, a [`SemaphorePermit`] is returned.
     /// The permits will be automatically returned to the semaphore when the permit
@@ -201,7 +202,7 @@ impl Semaphore {
         }
     }
 
-    /// Acquires `n` permits from the semaphore.
+    /// Acquires `permits` permits from the semaphore.
     ///
     /// If the permits are not immediately available, this method will wait until they become
     /// available. Returns a [`SemaphorePermit`] that will release the permits when dropped.
@@ -240,7 +241,7 @@ impl Semaphore {
         SemaphorePermit { sem: self, permits }
     }
 
-    /// Attempts to acquire `n` permits from the semaphore without blocking.
+    /// Attempts to acquire `permits` permits from the semaphore without blocking.
     ///
     /// The semaphore must be wrapped in an [`Arc`] to call this method.
     ///
@@ -276,7 +277,7 @@ impl Semaphore {
         }
     }
 
-    /// Acquires `n` permits from the semaphore.
+    /// Acquires `permits` permits from the semaphore.
     ///
     /// The semaphore must be wrapped in an [`Arc`] to call this method.
     ///
@@ -399,7 +400,7 @@ impl SemaphorePermit<'_> {
     #[track_caller]
     pub fn merge(&mut self, mut other: Self) {
         assert!(
-            std::ptr::eq(self.sem, other.sem),
+            ptr::eq(self.sem, other.sem),
             "merging permits from different semaphore instances"
         );
         self.permits = self

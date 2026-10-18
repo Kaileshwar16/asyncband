@@ -109,12 +109,12 @@ use std::sync::atomic::Ordering;
 use std::task::Context;
 use std::task::Poll;
 
-use super::common;
-use super::common::Backlog;
-use super::common::Inner;
-use super::error::RecvError;
-use super::error::TryRecvError;
-use super::error::TrySendError;
+use crate::broadcast::mpmc::common;
+use crate::broadcast::mpmc::common::Backlog;
+use crate::broadcast::mpmc::common::Inner;
+use crate::broadcast::mpmc::error::RecvError;
+use crate::broadcast::mpmc::error::TryRecvError;
+use crate::broadcast::mpmc::error::TrySendError;
 use crate::internal::arena::SlotId;
 use crate::internal::mutex::Mutex;
 use crate::internal::semaphore::Acquire;
@@ -195,7 +195,7 @@ impl<T> Shared<T> {
         // subscription.
         let waiting = self.waiting_senders();
         if freed > 0 && waiting > 0 {
-            self.tx_permits.release_if_nonempty(freed.min(waiting));
+            self.tx_permits.release_if_waiters(freed.min(waiting));
         }
     }
 
@@ -323,7 +323,7 @@ impl<T> BoundedSender<T> {
                 };
 
                 loop {
-                    // Enqueue before rechecking. `release_if_nonempty` adds nothing when no
+                    // Enqueue before rechecking. `release_if_waiters` adds nothing when no
                     // producer is queued, so a reclaim landing between the recheck and the
                     // registration would otherwise drop its wake-up and park this producer for
                     // good. Registering first orders this producer's semaphore acquisition ahead

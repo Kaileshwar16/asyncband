@@ -15,6 +15,10 @@
 // specific language governing permissions and limitations
 // under the License.
 
+use std::array;
+use std::panic::AssertUnwindSafe;
+use std::panic::catch_unwind;
+use std::pin::pin;
 use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
@@ -50,8 +54,7 @@ fn bounded_receiver_drop_releases_registered_waker() {
     let retained = Arc::downgrade(&holder);
     let waker = Waker::from(holder);
     assert!(
-        Box::pin(rx.recv())
-            .as_mut()
+        pin!(rx.recv())
             .poll(&mut Context::from_waker(&waker))
             .is_pending()
     );
@@ -67,8 +70,7 @@ fn unbounded_receiver_drop_releases_registered_waker() {
     let retained = Arc::downgrade(&holder);
     let waker = Waker::from(holder);
     assert!(
-        Box::pin(rx.recv())
-            .as_mut()
+        pin!(rx.recv())
             .poll(&mut Context::from_waker(&waker))
             .is_pending()
     );
@@ -85,7 +87,7 @@ fn wake_callbacks_can_send_into_the_same_channel() {
             let tx = tx.clone();
             move || tx.try_send(2).unwrap()
         });
-        assert!(poll_with(Box::pin(rx.recv()).as_mut(), &waker).is_pending());
+        assert!(poll_with(pin!(rx.recv()), &waker).is_pending());
         tx.try_send(1).unwrap();
         assert_eq!(rx.try_recv(), Ok(1));
         assert_eq!(rx.try_recv(), Ok(2));
@@ -95,7 +97,7 @@ fn wake_callbacks_can_send_into_the_same_channel() {
             let tx = tx.clone();
             move || tx.send(2).unwrap()
         });
-        assert!(poll_with(Box::pin(rx.recv()).as_mut(), &waker).is_pending());
+        assert!(poll_with(pin!(rx.recv()), &waker).is_pending());
         tx.send(1).unwrap();
         assert_eq!(rx.try_recv(), Ok(1));
         assert_eq!(rx.try_recv(), Ok(2));
@@ -138,10 +140,10 @@ fn bounded_receiver_waker_replacement_can_send() {
     assert_completes_without_deadlock(|| {
         let (tx, mut rx) = mpsc::bounded(1);
         let waker = waker_on_drop(move || tx.try_send(7).unwrap());
-        assert!(poll_with(Box::pin(rx.recv()).as_mut(), &waker).is_pending());
+        assert!(poll_with(pin!(rx.recv()), &waker).is_pending());
         drop(waker);
         let (waker, wakes) = WakeCounter::new();
-        let poll = poll_with(Box::pin(rx.recv()).as_mut(), &waker);
+        let poll = poll_with(pin!(rx.recv()), &waker);
         if poll.is_pending() {
             assert!(wakes.count() > 0);
             assert_eq!(rx.try_recv(), Ok(7));
@@ -166,8 +168,7 @@ fn unbounded_replaced_and_disconnected_wakers_can_send() {
                 }
             });
             assert!(
-                Box::pin(rx.recv())
-                    .as_mut()
+                pin!(rx.recv())
                     .poll(&mut Context::from_waker(&waker))
                     .is_pending()
             );
@@ -178,7 +179,7 @@ fn unbounded_replaced_and_disconnected_wakers_can_send() {
                 // Replacing the waker can enqueue a message during this poll. Either immediate
                 // completion or a notified Pending is valid, but the message must not be lost.
                 let (waker, counter) = WakeCounter::new();
-                let poll = poll_with(Box::pin(rx.recv()).as_mut(), &waker);
+                let poll = poll_with(pin!(rx.recv()), &waker);
                 if poll.is_pending() {
                     assert!(counter.count() > 0);
                     assert_eq!(rx.try_recv(), Ok(7));
@@ -244,7 +245,7 @@ fn bounded_disconnect_finishes_cleanup_when_a_value_destructor_panics() {
     }
 
     let (tx, rx) = mpsc::bounded(3);
-    let drops = Arc::new(std::array::from_fn(|_| AtomicUsize::new(0)));
+    let drops = Arc::new(array::from_fn(|_| AtomicUsize::new(0)));
     for id in 0..3 {
         assert!(
             tx.try_send(Value {
@@ -270,7 +271,7 @@ fn bounded_disconnect_finishes_cleanup_when_a_value_destructor_panics() {
     for (send, (waker, _)) in sends.iter_mut().zip(&notifications) {
         assert!(poll_with(send.as_mut(), waker).is_pending());
     }
-    assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(rx))).is_err());
+    assert!(catch_unwind(AssertUnwindSafe(|| drop(rx))).is_err());
     for (_, wakes) in &notifications {
         assert_eq!(wakes.count(), 1);
     }

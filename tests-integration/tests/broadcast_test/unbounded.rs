@@ -15,6 +15,9 @@
 // specific language governing permissions and limitations
 // under the License.
 
+use std::panic::AssertUnwindSafe;
+use std::panic::catch_unwind;
+use std::pin::pin;
 use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
@@ -264,9 +267,7 @@ fn panicking_clone_leaves_the_channel_consistent() {
     });
 
     // Two receivers share the payload, so `try_recv` has to clone it.
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        rx1.try_recv().map(|msg| msg.value)
-    }));
+    let result = catch_unwind(AssertUnwindSafe(|| rx1.try_recv().map(|msg| msg.value)));
     assert!(result.is_err());
 
     // The panicking `try_recv` call still consumed the message for `rx1`, and left the channel
@@ -312,7 +313,7 @@ fn send_wakes_a_parked_receiver_exactly_once() {
     let tracker = Arc::new(WakeCounter::default());
     let waker = Waker::from(tracker.clone());
     let mut context = Context::from_waker(&waker);
-    let mut recv = Box::pin(rx.recv());
+    let mut recv = pin!(rx.recv());
 
     assert!(recv.as_mut().poll(&mut context).is_pending());
 
@@ -360,7 +361,7 @@ fn dropping_a_woken_recv_keeps_another_receivers_waiter() {
     let second = Arc::new(WakeCounter::default());
     let waker = Waker::from(second.clone());
     let mut context = Context::from_waker(&waker);
-    let mut recv2 = Box::pin(rx2.recv());
+    let mut recv2 = pin!(rx2.recv());
     assert!(recv2.as_mut().poll(&mut context).is_pending());
 
     // `recv1` was already woken, so dropping it must not release the slot `recv2` now owns.

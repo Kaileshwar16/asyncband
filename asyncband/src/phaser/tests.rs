@@ -15,9 +15,9 @@
 // specific language governing permissions and limitations
 // under the License.
 
-use std::task::Poll;
+use std::pin::pin;
 
-use super::Phaser;
+use super::*;
 use crate::test_support::poll_once;
 
 #[test]
@@ -39,8 +39,5 @@ fn a_late_waiter_observes_completion_across_counter_wraparound() {
     let mut participant = phaser.register_one().unwrap();
     participant.arrive().unwrap();
     phaser.close();
-    assert_eq!(
-        poll_once(Box::pin(participant.wait()).as_mut()),
-        Poll::Ready(Ok(0))
-    );
+    assert_eq!(poll_once(pin!(participant.wait())), Poll::Ready(Ok(0)));
 }

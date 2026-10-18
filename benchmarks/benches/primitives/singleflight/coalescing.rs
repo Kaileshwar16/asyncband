@@ -16,6 +16,7 @@
 // under the License.
 
 use std::cell::Cell;
+use std::pin::pin;
 
 use benchmarks::support::bench_context;
 use benchmarks::support::poll_pending;
@@ -25,9 +26,9 @@ use divan::Bencher;
 use divan::black_box;
 use divan::counter::ItemsCount;
 
-use super::support::BATCH_SAMPLE_SIZE;
-use super::support::BATCH_SIZES;
-use super::support::BenchGroup;
+use crate::singleflight::support::BATCH_SAMPLE_SIZE;
+use crate::singleflight::support::BATCH_SIZES;
+use crate::singleflight::support::BenchGroup;
 
 // Measures the complete successful fan-in: one leader is suspended, every duplicate joins it, and
 // all callers receive the cloned result after the leader completes.
@@ -39,7 +40,7 @@ fn complete_coalesced(bencher: Bencher, caller_count: usize) {
         .counter(ItemsCount::new(caller_count))
         .bench_local(|| {
             let gate = Cell::new(false);
-            let mut leader = Box::pin(group.work(0, || async {
+            let mut leader = pin!(group.work(0, || async {
                 wait_until_open(&gate).await;
                 black_box(1usize)
             }));
@@ -70,7 +71,7 @@ fn sequential_retries_after_leader_error(bencher: Bencher, caller_count: usize) 
         .counter(ItemsCount::new(caller_count))
         .bench_local(|| {
             let gate = Cell::new(false);
-            let mut leader = Box::pin(group.try_work(0, || async {
+            let mut leader = pin!(group.try_work(0, || async {
                 wait_until_open(&gate).await;
                 Err::<usize, ()>(())
             }));

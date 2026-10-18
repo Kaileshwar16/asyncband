@@ -15,12 +15,14 @@
 // specific language governing permissions and limitations
 // under the License.
 
+use std::pin::pin;
 use std::sync::Arc;
 use std::task::Context;
 use std::task::Waker;
 
 use asyncband::latch::Latch;
 use tests_integration::WakeCounter;
+use tokio::sync::Barrier;
 
 #[test]
 fn countdown_operations_saturate_at_zero() {
@@ -66,8 +68,8 @@ fn final_arrival_wakes_every_waiter() {
     let second_waker = Waker::from(second_tracker.clone());
     let mut first_context = Context::from_waker(&first_waker);
     let mut second_context = Context::from_waker(&second_waker);
-    let mut first = Box::pin(latch.wait());
-    let mut second = Box::pin(latch.wait());
+    let mut first = pin!(latch.wait());
+    let mut second = pin!(latch.wait());
 
     assert!(first.as_mut().poll(&mut first_context).is_pending());
     assert!(second.as_mut().poll(&mut second_context).is_pending());
@@ -97,7 +99,7 @@ async fn concurrent_arrivals_complete_the_latch() {
     const TASKS: usize = 32;
 
     let latch = Arc::new(Latch::new(TASKS as u32));
-    let start = Arc::new(tokio::sync::Barrier::new(TASKS + 1));
+    let start = Arc::new(Barrier::new(TASKS + 1));
     let mut tasks = Vec::with_capacity(TASKS);
 
     for _ in 0..TASKS {
