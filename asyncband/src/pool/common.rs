@@ -95,8 +95,8 @@ pub trait ManageObject: Send + Sync {
     ///
     /// This check runs when checking out an idle object, not when creating or returning one.
     /// It may inspect local state or await I/O, such as a network ping. For diagnostics,
-    /// intentional retirement, and cleanup before return, see the [recycling
-    /// guide](crate::pool#recycling-diagnostics-and-check-timing).
+    /// intentional retirement, and cleanup before return, see the [pool module
+    /// documentation](crate::pool#recycling-diagnostics-and-check-timing).
     fn is_recyclable(
         &self,
         o: &mut Self::Object,
