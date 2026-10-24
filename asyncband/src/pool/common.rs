@@ -87,7 +87,7 @@ pub trait ManageObject: Send + Sync {
     /// Creates a new object.
     fn create(&self) -> impl Future<Output = Result<Self::Object, Self::Error>> + Send;
 
-    /// Checks whether an idle object can be reused.
+    /// Whether the object `o` is recyclable.
     ///
     /// Returns `Ok(())` if the object is recyclable. On error, the pool detaches the object and
     /// retries checkout with another idle object or creates a replacement. The error is discarded
