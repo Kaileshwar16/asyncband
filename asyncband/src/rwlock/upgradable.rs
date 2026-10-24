@@ -71,6 +71,7 @@ use crate::rwlock::write_guard;
 /// # Example
 ///
 /// ```
+/// use asyncband::rwlock::RwLockUpgradableReadGuard;
 /// use asyncband::rwlock::UpgradableRwLock;
 ///
 /// # #[tokio::main]
@@ -78,7 +79,7 @@ use crate::rwlock::write_guard;
 /// let routes = UpgradableRwLock::new(vec!["/health"]);
 /// let snapshot = routes.upgradable_read().await;
 /// let snapshot = if !snapshot.contains(&"/metrics") {
-///     let mut edit = snapshot.upgrade().await;
+///     let mut edit = RwLockUpgradableReadGuard::upgrade(snapshot).await;
 ///     edit.push("/metrics");
 ///     edit.downgrade()
 /// } else {
@@ -271,12 +272,12 @@ impl<'a, T: ?Sized> RwLockUpgradableReadGuard<'a, T> {
     /// This consumes the guard. Dropping the future releases the original reader slot, any
     /// partially or fully assigned upgrade permits, and the reservation. This also holds if the
     /// future has never been polled. The original guard is not returned on cancellation.
-    pub async fn upgrade(self) -> RwLockWriteGuard<'a, T> {
-        let lock = *self.access.owner();
+    pub async fn upgrade(this: Self) -> RwLockWriteGuard<'a, T> {
+        let lock = *this.access.owner();
         // Keep both RAII tokens alive across the await. The semaphore's acquisition future owns
         // additional permits until completion and returns them if cancelled, even after a grant.
         lock.s.acquire(lock.max_readers - 1).await;
-        self.into_write()
+        this.into_write()
     }
 
     /// Converts immediately to exclusive access, or returns the unchanged guard on failure.
@@ -285,22 +286,23 @@ impl<'a, T: ?Sized> RwLockUpgradableReadGuard<'a, T> {
     /// limit of one, this always succeeds.
     ///
     /// ```
+    /// use asyncband::rwlock::RwLockUpgradableReadGuard;
     /// use asyncband::rwlock::UpgradableRwLock;
     ///
     /// let lock = UpgradableRwLock::new(1);
     /// let upgradable = lock.try_upgradable_read().unwrap();
     /// let reader = lock.try_read().unwrap();
-    /// let upgradable = upgradable.try_upgrade().unwrap_err();
+    /// let upgradable = RwLockUpgradableReadGuard::try_upgrade(upgradable).unwrap_err();
     /// drop(reader);
-    /// let mut writer = upgradable.try_upgrade().unwrap();
+    /// let mut writer = RwLockUpgradableReadGuard::try_upgrade(upgradable).unwrap();
     /// *writer += 1;
     /// ```
-    pub fn try_upgrade(self) -> Result<RwLockWriteGuard<'a, T>, Self> {
-        let lock = *self.access.owner();
+    pub fn try_upgrade(this: Self) -> Result<RwLockWriteGuard<'a, T>, Self> {
+        let lock = *this.access.owner();
         if lock.s.try_acquire(lock.max_readers - 1) {
-            Ok(self.into_write())
+            Ok(this.into_write())
         } else {
-            Err(self)
+            Err(this)
         }
     }
 
@@ -371,7 +373,7 @@ mod compile_fail_tests {
     /// let lock = UpgradableRwLock::new(0);
     /// let guard = lock.try_upgradable_read().unwrap();
     /// let borrowed = &*guard;
-    /// let mut writer = guard.try_upgrade().unwrap();
+    /// let mut writer = RwLockUpgradableReadGuard::try_upgrade(guard).unwrap();
     /// *writer = 1;
     /// assert_eq!(*borrowed, 0);
     /// ```

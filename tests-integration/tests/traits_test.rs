@@ -170,7 +170,9 @@ fn movable_public_types_are_send() {
     assert_send_value(lock.read());
     assert_send_value(lock.write());
     assert_send_value(lock.upgradable_read());
-    assert_send_value(lock.try_upgradable_read().unwrap().upgrade());
+    assert_send_value(RwLockUpgradableReadGuard::upgrade(
+        lock.try_upgradable_read().unwrap(),
+    ));
 
     let (_tx, mut rx) = watch::channel(0);
     assert_send_value(rx.changed());
