@@ -47,6 +47,7 @@ workspace = true
 [[example]]
 name = "pool_recycling"
 path = "src/pool_recycling.rs"
+test = true
 
 [[example]]
 name = "coalesced_worker"
