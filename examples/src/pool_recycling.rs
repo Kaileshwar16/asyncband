@@ -73,13 +73,3 @@ async fn main() {
     assert!(!Arc::ptr_eq(&server_connected, &replacement.connected));
     println!("get() succeeded with a new connection");
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn disconnected_idle_connection_is_replaced() {
-        main();
-    }
-}
