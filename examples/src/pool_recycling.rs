@@ -15,30 +15,21 @@
 // specific language governing permissions and limitations
 // under the License.
 
-//! A service observes connection churn even when acquisition succeeds, and resets session state
-//! before return.
+//! Count failed connection checks separately from planned retirement, then reset session state
+//! before returning a connection to the pool. Connections simulate network operations.
 //!
-//! `WithRecycleDiagnostics` adapts an existing manager without changing its error type or retry
-//! policy. Failed pings and intentional retirement have separate counters; the same adapter works
-//! with either managed pool variant. Its callback runs on the acquiring task, so it should be quick
-//! and nonblocking. Cancelled checks have no result to report. The connections simulate I/O
-//! outcomes.
+//! `WithRecycleDiagnostics` reports errors from an existing manager. The pool still discards
+//! rejected connections and retries. The callback runs on the task calling `get()`, so keep it
+//! quick and nonblocking. A cancelled check has no error to report.
 //!
-//! `ReturnAfterReset` detaches by default so a failed or cancelled reset cannot return an unclean
-//! connection. Install it before borrower work begins; only successful cleanup permits ordinary
-//! return. This guard is application policy, independent of the pool's checkout cancellation
-//! strategy. A successful reset cannot prevent a later disconnect while idle, so this service also
-//! checks at checkout. Workloads that only need local-state checks can implement those in
-//! `is_recyclable`.
+//! `ReturnAfterReset` owns the connection while the caller uses it. It returns the connection only
+//! after a successful reset; an error or cancellation drops the guard and discards the connection.
+//! The manager still pings reused connections because they can disconnect while idle.
 
-use std::future::Future;
-use std::pin::pin;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
-use std::task::Context;
-use std::task::Waker;
 
 use asyncband::pool::ManageObject;
 use asyncband::pool::ObjectStatus;
@@ -114,7 +105,9 @@ impl Connection {
     }
 }
 
+#[derive(Clone, Default)]
 struct Manager {
+    recycle_checks: Arc<AtomicUsize>,
     detached: Arc<AtomicUsize>,
 }
 
@@ -134,6 +127,7 @@ impl ManageObject for Manager {
         connection: &mut Connection,
         status: &ObjectStatus,
     ) -> Result<(), RecycleError> {
+        self.recycle_checks.fetch_add(1, Ordering::Relaxed);
         // A low usage limit makes intentional retirement easy to observe in this example.
         if status.recycle_count() >= 1 {
             return Err(RecycleError::Retired);
@@ -171,13 +165,17 @@ impl<M: ManageObject> Drop for ReturnAfterReset<M> {
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
+    recycling_diagnostics().await;
+    cleanup_before_return().await;
+    discard_broken_connection().await;
+}
+
+async fn recycling_diagnostics() {
     let failed_pings = AtomicUsize::new(0);
     let retirements = AtomicUsize::new(0);
-    let detached = Arc::new(AtomicUsize::new(0));
-    let manager = WithRecycleDiagnostics {
-        manager: Manager {
-            detached: detached.clone(),
-        },
+    let manager = Manager::default();
+    let observed = WithRecycleDiagnostics {
+        manager: manager.clone(),
         report: |error: &RecycleError, _status: &ObjectStatus| match error {
             RecycleError::PingFailed => {
                 failed_pings.fetch_add(1, Ordering::Relaxed);
@@ -187,35 +185,47 @@ async fn main() {
             }
         },
     };
-    let pool = Pool::new(PoolConfig::new(1), manager);
+    let pool = Pool::new(PoolConfig::new(1), observed);
 
     let first = pool.get().await.unwrap();
+    assert_eq!(manager.recycle_checks.load(Ordering::Relaxed), 0);
     let remote_connection = first.connected.clone();
     drop(first);
+    assert_eq!(manager.recycle_checks.load(Ordering::Relaxed), 0);
     // The remote end disconnects while the connection is idle.
     remote_connection.store(false, Ordering::Relaxed);
     let replacement = pool.get().await.unwrap();
+    assert_eq!(manager.recycle_checks.load(Ordering::Relaxed), 1);
     assert_eq!(failed_pings.load(Ordering::Relaxed), 1);
-    assert_eq!(detached.load(Ordering::Relaxed), 1);
+    assert_eq!(manager.detached.load(Ordering::Relaxed), 1);
     assert!(!Arc::ptr_eq(&remote_connection, &replacement.connected));
+    println!("No recycle check on creation or return; one check when reusing an idle connection");
     println!("Acquisition succeeded after reporting one failed ping");
 
     drop(replacement);
+    assert_eq!(manager.recycle_checks.load(Ordering::Relaxed), 1);
     let reused = pool.get().await.unwrap();
+    assert_eq!(manager.recycle_checks.load(Ordering::Relaxed), 2);
     assert_eq!(reused.status().recycle_count(), 1);
     drop(reused);
-    let clean = pool.get().await.unwrap();
+    let _replacement = pool.get().await.unwrap();
     assert_eq!(retirements.load(Ordering::Relaxed), 1);
     assert_eq!(failed_pings.load(Ordering::Relaxed), 1);
     println!("Usage-limit retirement counted separately from failed pings");
+}
 
-    let mut session = ReturnAfterReset(Some(clean));
+async fn cleanup_before_return() {
+    let manager = Manager::default();
+    let pool = Pool::new(PoolConfig::new(1), manager.clone());
+    let mut session = ReturnAfterReset(Some(pool.get().await.unwrap()));
     session.connection().dirty = true;
     let connection = session.connection().connected.clone();
     session.reset_and_return().await.unwrap();
     let reused = pool.get().await.unwrap();
     assert!(!reused.dirty);
     assert!(Arc::ptr_eq(&connection, &reused.connected));
+    assert_eq!(manager.detached.load(Ordering::Relaxed), 0);
+    println!("Successful reset returned the same connection with clean session state");
 
     let mut session = ReturnAfterReset(Some(reused));
     session.connection().dirty = true;
@@ -226,35 +236,30 @@ async fn main() {
     let result = session.reset_and_return().await;
     assert!(matches!(result, Err(ResetFailed)));
     assert_eq!(pool.status().current_size, 0);
-    assert_eq!(detached.load(Ordering::Relaxed), 3);
+    assert_eq!(manager.detached.load(Ordering::Relaxed), 1);
+    println!("Failed reset discarded the connection");
+}
 
-    {
-        let mut session = ReturnAfterReset(Some(pool.get().await.unwrap()));
-        session.connection().dirty = true;
-        let mut reset = pin!(session.reset_and_return());
-        // Poll through yield_now to simulate cancellation during asynchronous cleanup.
-        assert!(
-            reset
-                .as_mut()
-                .poll(&mut Context::from_waker(Waker::noop()))
-                .is_pending()
-        );
-    }
-    assert_eq!(pool.status().current_size, 0);
-    assert_eq!(detached.load(Ordering::Relaxed), 4);
-    println!("Failed and cancelled resets both detached their connections");
-
+async fn discard_broken_connection() {
+    let manager = Manager::default();
+    let pool = Pool::new(PoolConfig::new(1), manager.clone());
     let broken = pool.get().await.unwrap();
     broken.connected.store(false, Ordering::Relaxed);
     // A borrower that has already observed a failure can skip reset and another ping.
     drop(broken.detach());
     assert_eq!(pool.status().current_size, 0);
-    assert_eq!(failed_pings.load(Ordering::Relaxed), 1);
-    assert_eq!(detached.load(Ordering::Relaxed), 5);
+    assert_eq!(manager.recycle_checks.load(Ordering::Relaxed), 0);
+    assert_eq!(manager.detached.load(Ordering::Relaxed), 1);
+    println!("Known-broken connection discarded without another check");
 }
 
 #[cfg(test)]
 mod tests {
+    use std::future::Future;
+    use std::pin::pin;
+    use std::task::Context;
+    use std::task::Waker;
+
     use super::*;
 
     #[test]
@@ -263,14 +268,29 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cancellation_before_reset_also_detaches() {
-        let detached = Arc::new(AtomicUsize::new(0));
-        let pool = Pool::new(
-            PoolConfig::new(1),
-            Manager {
-                detached: detached.clone(),
-            },
-        );
+    async fn cancellation_during_reset_detaches() {
+        let manager = Manager::default();
+        let pool = Pool::new(PoolConfig::new(1), manager.clone());
+
+        {
+            let mut session = ReturnAfterReset(Some(pool.get().await.unwrap()));
+            session.connection().dirty = true;
+            let mut reset = pin!(session.reset_and_return());
+            assert!(
+                reset
+                    .as_mut()
+                    .poll(&mut Context::from_waker(Waker::noop()))
+                    .is_pending()
+            );
+        }
+        assert_eq!(pool.status().current_size, 0);
+        assert_eq!(manager.detached.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn cancellation_before_reset_detaches() {
+        let manager = Manager::default();
+        let pool = Pool::new(PoolConfig::new(1), manager.clone());
 
         // Cancellation can occur in borrower work, before reset is even requested.
         {
@@ -288,13 +308,19 @@ mod tests {
             );
         }
         assert_eq!(pool.status().current_size, 0);
-        assert_eq!(detached.load(Ordering::Relaxed), 1);
+        assert_eq!(manager.detached.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn unpolled_reset_detaches() {
+        let manager = Manager::default();
+        let pool = Pool::new(PoolConfig::new(1), manager.clone());
 
         let mut session = ReturnAfterReset(Some(pool.get().await.unwrap()));
         session.connection().dirty = true;
         // The future owns the guard even if it is dropped without being polled.
         drop(session.reset_and_return());
         assert_eq!(pool.status().current_size, 0);
-        assert_eq!(detached.load(Ordering::Relaxed), 2);
+        assert_eq!(manager.detached.load(Ordering::Relaxed), 1);
     }
 }

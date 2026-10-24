@@ -207,20 +207,115 @@
 //! }
 //! ```
 //!
-//! # Recycling diagnostics and check timing
+//! ## When does the pool check an object?
 //!
-//! A rejected idle object does not necessarily fail acquisition: [`ManageObject::is_recyclable`]
-//! errors cause `get()` to detach the object and retry. Record rejection reasons in the manager,
-//! or wrap an existing manager to report its errors. Distinguish intentional retirement from failed
-//! health checks in application diagnostics; [`ManageObject::on_detached`] receives no reason.
+//! - When `get()` takes an idle object from the pool, it calls [`ManageObject::is_recyclable`].
+//! - When `get()` creates a new object, it returns it without calling `is_recyclable`.
+//! - When a caller drops an [`Object`](bounded::Object), it goes back into the pool without a check
+//!   or cleanup.
 //!
-//! Returning an object does not validate or reset it. Callers can await cleanup before return or
-//! detach an object already known to be broken. If cancellation could leave it unusable, an
-//! application guard should own the object before borrower work begins and detach on drop unless
-//! cleanup succeeds. [`RecycleCancelledStrategy`] applies only to checkout checks.
+//! ## Why can connection checks fail while `get()` still succeeds?
 //!
-//! The [pool recycling example](https://github.com/apache/asyncband/blob/main/examples/src/pool_recycling.rs)
-//! demonstrates diagnostics and cleanup using the existing manager and object APIs.
+//! If `is_recyclable` returns an error, the pool discards that connection and tries another idle
+//! connection or creates a new one. `get()` returns an error only if [`ManageObject::create`]
+//! fails. To find out why connections are being discarded, log or count errors inside
+//! `is_recyclable`; [`ManageObject::on_detached`] does not receive the error.
+//!
+//! For example, this manager logs failed pings but treats reaching a reuse limit as planned
+//! retirement:
+//!
+//! ```
+//! use std::io;
+//!
+//! use asyncband::pool::ManageObject;
+//! use asyncband::pool::ObjectStatus;
+//!
+//! # struct Connection;
+//! # impl Connection {
+//! #     async fn ping(&mut self) -> io::Result<()> { Ok(()) }
+//! # }
+//! #[derive(Debug)]
+//! enum RecycleError {
+//!     Retired,
+//!     PingFailed(io::Error),
+//! }
+//!
+//! struct Manager;
+//! impl ManageObject for Manager {
+//!     type Object = Connection;
+//!     type Error = RecycleError;
+//!
+//! #     async fn create(&self) -> Result<Connection, RecycleError> { Ok(Connection) }
+//!     async fn is_recyclable(
+//!         &self,
+//!         connection: &mut Connection,
+//!         status: &ObjectStatus,
+//!     ) -> Result<(), RecycleError> {
+//!         if status.recycle_count() >= 1_000 {
+//!             return Err(RecycleError::Retired);
+//!         }
+//!         connection.ping().await.map_err(|error| {
+//!             eprintln!("Connection ping failed: {error}");
+//!             RecycleError::PingFailed(error)
+//!         })
+//!     }
+//! }
+//! ```
+//!
+//! ## How do I clean a connection before returning it?
+//!
+//! A database connection may need a session reset after a query. Dropping the pooled object does
+//! not run that reset. The wrapper below keeps the connection out of the pool until `reset()`
+//! succeeds. If the query or reset fails, or the task is cancelled during either operation, its
+//! `Drop` implementation discards the connection.
+//!
+//! ```
+//! use std::io;
+//!
+//! use asyncband::pool::ManageObject;
+//! use asyncband::pool::bounded::Object;
+//!
+//! # struct Connection;
+//! # impl Connection {
+//! #     async fn execute(&mut self, _query: &str) -> io::Result<()> { Ok(()) }
+//! #     async fn reset(&mut self) -> io::Result<()> { Ok(()) }
+//! # }
+//! struct ReturnAfterReset<M: ManageObject>(Option<Object<M>>);
+//!
+//! impl<M: ManageObject<Object = Connection>> ReturnAfterReset<M> {
+//!     fn connection(&mut self) -> &mut Connection {
+//!         self.0.as_mut().unwrap()
+//!     }
+//!
+//!     async fn reset_and_return(mut self) -> io::Result<()> {
+//!         self.connection().reset().await?;
+//!         // Only a successful reset allows the object to return to the pool.
+//!         drop(self.0.take());
+//!         Ok(())
+//!     }
+//! }
+//!
+//! impl<M: ManageObject> Drop for ReturnAfterReset<M> {
+//!     fn drop(&mut self) {
+//!         if let Some(connection) = self.0.take() {
+//!             drop(connection.detach());
+//!         }
+//!     }
+//! }
+//!
+//! async fn run_query<M: ManageObject<Object = Connection>>(
+//!     connection: Object<M>,
+//! ) -> io::Result<()> {
+//!     let mut session = ReturnAfterReset(Some(connection));
+//!     session.connection().execute("SELECT 1").await?;
+//!     session.reset_and_return().await
+//! }
+//! ```
+//!
+//! If a caller already knows a connection is broken, it can discard it immediately with
+//! `drop(connection.detach())`. [`RecycleCancelledStrategy`] controls only cancellation of
+//! `is_recyclable` during `get()`; it does not handle cancellation while the caller uses or resets
+//! the connection.
 
 mod common;
 mod state;
