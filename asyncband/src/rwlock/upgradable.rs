@@ -367,7 +367,8 @@ mod compile_fail_tests {
     /// ```
     struct UpgradableGuardRequiresSync;
 
-    /// ```compile_fail
+    /// ```compile_fail,E0505
+    /// use asyncband::rwlock::RwLockUpgradableReadGuard;
     /// use asyncband::rwlock::UpgradableRwLock;
     ///
     /// let lock = UpgradableRwLock::new(0);

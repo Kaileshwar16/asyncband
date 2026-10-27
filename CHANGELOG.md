@@ -27,6 +27,10 @@ All notable changes to this project will be documented in this file.
 
 * Add `rwlock::UpgradableRwLock` with a single upgradable reader, atomic upgrade and downgrade, and cancellation that releases a pending upgrade's guard; writers and upgradable readers share a FIFO reservation while ordinary readers use the data-permit queue.
 
+### Bug fixes
+
+* Prevent `OnceMap` from keeping an empty entry when a computation fails, panics, or is cancelled while a concurrent `get` looks up the same key.
+
 ### Improvements
 
 * Reduce the cost of polling a pending oneshot receive again from the same task, which now keeps its registered waker instead of cloning and dropping it.
