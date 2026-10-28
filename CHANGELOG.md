@@ -23,6 +23,10 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+### Breaking changes
+
+* Remove `MappedRwLockWriteGuard::downgrade` and `OwnedMappedRwLockWriteGuard::downgrade`, which could cause undefined behavior when the mapped component is reachable by other readers through interior mutability. To keep shared access to a component, downgrade the original write guard first and then map it with `RwLockReadGuard::map` or `OwnedRwLockReadGuard::map`.
+
 ### Bug fixes
 
 * Prevent `OnceMap` from keeping an empty entry when a computation fails, panics, or is cancelled while a concurrent `get` looks up the same key.
