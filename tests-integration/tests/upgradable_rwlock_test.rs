@@ -15,6 +15,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
+use std::cell::RefCell;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::sync::Barrier;
@@ -24,6 +25,8 @@ use std::sync::atomic::Ordering;
 use std::thread;
 
 use asyncband::blocking::FutureExt;
+use asyncband::rwlock::MappedRwLockReadGuard;
+use asyncband::rwlock::RwLockReadGuard;
 use asyncband::rwlock::RwLockUpgradableReadGuard;
 use asyncband::rwlock::UpgradableRwLock;
 use tests_integration::assert_completes_without_deadlock;
@@ -58,6 +61,84 @@ fn upgrade_mutate_and_downgrade_without_unlocking() {
     let read = write.downgrade();
     assert_eq!(*read, 42);
     assert_eq!(*lock.try_read().unwrap(), 42);
+    assert!(lock.try_write().is_none());
+    drop(read);
+    assert!(lock.try_write().is_some());
+}
+
+#[test]
+#[allow(
+    clippy::replace_box,
+    reason = "Exercise allocation replacement through shared readers."
+)]
+fn upgraded_writer_can_downgrade_then_map_shared_interior_mutability() {
+    for limit in [2, 3, usize::MAX] {
+        for mode in 0..3 {
+            let lock = UpgradableRwLock::with_max_readers(
+                Some(RefCell::new(Box::new(0))),
+                NonZeroUsize::new(limit).unwrap(),
+            );
+            let upgradable = lock.try_upgradable_read().unwrap();
+            let mut write = match mode {
+                0 => RwLockUpgradableReadGuard::try_upgrade(upgradable).unwrap(),
+                1 => FutureExt::block_on(RwLockUpgradableReadGuard::upgrade(upgradable)),
+                _ => {
+                    let reader = lock.try_read().unwrap();
+                    let mut upgrade = spawn(RwLockUpgradableReadGuard::upgrade(upgradable));
+                    assert_pending!(upgrade.poll());
+                    *reader.as_ref().unwrap().borrow_mut() = Box::new(7);
+                    drop(reader);
+                    let write = assert_ready!(upgrade.poll());
+                    assert_eq!(**write.as_ref().unwrap().borrow(), 7);
+                    write
+                }
+            };
+            *write.as_mut().unwrap().get_mut() = Box::new(1);
+            // Project shared access only after downgrading the original write guard.
+            let read = RwLockReadGuard::map(write.downgrade(), |value| value);
+            let read = MappedRwLockReadGuard::filter_map(read, Option::as_ref).unwrap();
+            let shared = &*read;
+            let other = lock.try_read().unwrap();
+            *other.as_ref().unwrap().borrow_mut() = Box::new(2);
+            assert_eq!(**shared.borrow(), 2);
+            drop(other);
+
+            let next = lock.try_upgradable_read().unwrap();
+            let mut upgrade = spawn(RwLockUpgradableReadGuard::upgrade(next));
+            assert_pending!(upgrade.poll());
+            assert_eq!(**shared.borrow(), 2);
+            drop(read);
+            let mut write = assert_ready!(upgrade.poll());
+            *write.as_mut().unwrap().get_mut() = Box::new(3);
+            drop(write);
+            assert_eq!(**lock.try_read().unwrap().as_ref().unwrap().borrow(), 3);
+        }
+    }
+}
+
+#[test]
+#[allow(
+    clippy::replace_box,
+    reason = "Exercise allocation replacement through shared readers."
+)]
+fn cancelling_upgrade_preserves_a_mapped_readers_reference_and_permit() {
+    let lock = UpgradableRwLock::with_max_readers(
+        Some(RefCell::new(Box::new(0))),
+        NonZeroUsize::new(3).unwrap(),
+    );
+    let write =
+        RwLockUpgradableReadGuard::try_upgrade(lock.try_upgradable_read().unwrap()).unwrap();
+    let read = RwLockReadGuard::filter_map(write.downgrade(), Option::as_ref).unwrap();
+    let shared = &*read;
+    let next = lock.try_upgradable_read().unwrap();
+    let mut upgrade = spawn(RwLockUpgradableReadGuard::upgrade(next));
+    // The upgrade acquires one additional permit while the mapped reader retains the last.
+    assert_pending!(upgrade.poll());
+    drop(upgrade);
+    let next = lock.try_upgradable_read().unwrap();
+    *next.as_ref().unwrap().borrow_mut() = Box::new(1);
+    assert_eq!(**shared.borrow(), 1);
+    drop(next);
     assert!(lock.try_write().is_none());
     drop(read);
     assert!(lock.try_write().is_some());
