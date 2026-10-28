@@ -23,6 +23,10 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+### Breaking changes
+
+* Remove `MappedRwLockWriteGuard::downgrade` and `OwnedMappedRwLockWriteGuard::downgrade`, which could cause undefined behavior when the mapped component is reachable by other readers through interior mutability. To keep shared access to a component, downgrade the original write guard first and then map it with `RwLockReadGuard::map` or `OwnedRwLockReadGuard::map`.
+
 ### New features
 
 * Add `rwlock::UpgradableRwLock` with a single upgradable reader, atomic upgrade and downgrade, and cancellation that releases a pending upgrade's guard; writers and upgradable readers share a FIFO reservation while ordinary readers use the data-permit queue.
